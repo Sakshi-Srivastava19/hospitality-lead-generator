@@ -26,6 +26,47 @@ print("Loading MMT prices...")
 mmt_prices = get_mmt_prices("Chennai")
 
 print("MMT hotels found:", len(mmt_prices))
+
+# Show exactly what MMT returned so name-matching issues are visible
+for _mmt_name, _mmt_price in mmt_prices.items():
+    print("  MMT:", _mmt_name, "=>", _mmt_price)
+
+
+import re
+
+
+# Generic words shared across many Chennai hotels / MMT branding noise.
+# Removing only these (never location or brand words like "omr", "ibis")
+# keeps the distinctive core so token_sort_ratio can compare fairly.
+GENERIC_WORDS = {
+    "the", "a", "an", "in", "on", "by", "near", "and",
+    "hotel", "hotels", "chennai", "brand", "accor", "business"
+}
+
+
+def normalize_hotel_name(name):
+    """Strip noise so Google names and MMT names can be compared fairly.
+
+    Drops parentheticals, punctuation, and a small set of GENERIC words that
+    appear across many Chennai hotels (the/hotel/chennai/...). Location and
+    brand words (omr, sipcot, ibis, ginger, ...) are kept because they are
+    what distinguishes one property from another.
+    """
+
+    name = name.lower()
+
+    # drop parentheticals e.g. "(business class hotel)"
+    name = re.sub(r"\(.*?\)", " ", name)
+
+    # drop punctuation
+    name = re.sub(r"[^a-z0-9\s]", " ", name)
+
+    tokens = [
+        t for t in name.split()
+        if t and t not in GENERIC_WORDS
+    ]
+
+    return " ".join(tokens)
 # ==================================
 # CONFIGURATION
 # ==================================
@@ -212,11 +253,24 @@ for count, place in enumerate(
                 best_score = 0
                 best_price = ""
 
+                google_norm = normalize_hotel_name(name)
+
                 for mmt_name, mmt_price in mmt_prices.items():
 
+                    mmt_norm = normalize_hotel_name(mmt_name)
+
+                    # skip if either name is all generic words - an empty
+                    # string would otherwise score 100 against another empty
+                    if not google_norm or not mmt_norm:
+                        continue
+
+                    # token_sort_ratio penalises extra distinctive words
+                    # (e.g. "hydel park" vs "park"), which token_set_ratio
+                    # wrongly rewarded - that caused every "park" hotel to
+                    # grab The Park's price.
                     score = fuzz.token_sort_ratio(
-                        name.lower().strip(),
-                        mmt_name.lower().strip()
+                        google_norm,
+                        mmt_norm
                     )
 
                     if score > best_score:
@@ -224,7 +278,7 @@ for count, place in enumerate(
                         best_score = score
                         best_price = mmt_price
 
-                if best_score >= 85:
+                if best_score >= 80:
 
                     price_per_day = best_price
 

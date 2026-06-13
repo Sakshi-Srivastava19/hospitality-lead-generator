@@ -29,6 +29,16 @@ def search_places(query):
     print("Status:", data.get("status"))
     print("Results Found:", len(data.get("results", [])))
 
+    status = data.get("status")
+
+    if status not in ("OK", "ZERO_RESULTS"):
+        raise RuntimeError(
+            f"Google Places request failed: {status} - "
+            f"{data.get('error_message', 'no error message')}. "
+            f"Check that GOOGLE_PLACES_API_KEY in .env is a valid key "
+            f"with the Places API enabled and billing active."
+        )
+
     return data
 
 

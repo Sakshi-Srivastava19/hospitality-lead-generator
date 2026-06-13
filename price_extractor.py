@@ -1,6 +1,7 @@
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
+from bs4 import BeautifulSoup
 import re
 import time
 
@@ -100,9 +101,13 @@ def get_mmt_prices(city):
 
             time.sleep(2)
 
-        cards = driver.find_elements(
-            By.XPATH,
-            "//div[contains(@class,'listingRow')]"
+        soup = BeautifulSoup(
+            driver.page_source,
+            "lxml"
+        )
+
+        cards = soup.select(
+            "[class*='listingRow']"
         )
 
         print(
@@ -114,48 +119,24 @@ def get_mmt_prices(city):
 
             try:
 
-                text = card.text
+                name_node = card.select_one(
+                    "p[itemprop='name']"
+                )
 
-                lines = text.split("\n")
+                if not name_node:
+                    continue
 
-                hotel_name = ""
+                hotel_name = name_node.get_text(
+                    strip=True
+                )
 
-                for line in lines:
+                if not hotel_name:
+                    continue
 
-                    line = line.strip()
-
-                    skip_words = [
-                        "free cancellation",
-                        "check in",
-                        "per night",
-                        "couple friendly",
-                        "breakfast",
-                        "login",
-                        "deal",
-                        "offer",
-                        "discount",
-                        "rating",
-                        "ratings",
-                        "location",
-                        "photos",
-                        "book now"
-                    ]
-
-                    if any(
-                        word in line.lower()
-                        for word in skip_words
-                    ):
-                        continue
-
-                    if "₹" in line:
-                        continue
-
-                    if len(line) < 5:
-                        continue
-
-                    hotel_name = line
-
-                    break
+                text = card.get_text(
+                    " ",
+                    strip=True
+                )
 
                 matches = re.findall(
                     r'₹\s?[\d,]+',
