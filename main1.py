@@ -71,21 +71,63 @@ def normalize_hotel_name(name):
 # CONFIGURATION
 # ==================================
 
-QUERY = ["Hotels in Lonavala",
-    "Resorts in Lonavala",
-    "Villas in Lonavala",
-    "Homestays in Lonavala",
-    "Farmhouses in Lonavala",
-    "Lodges in Lonavala"]
 
-MAX_HOTELS = 20
 # ==================================
 # SEARCH HOTELS
 # ==================================
+SEARCH_QUERIES = [
+    "Hotels in Lonavala",
+    "Resorts in Lonavala",
+    "Luxury Resorts in Lonavala",
+    "Villas in Lonavala",
+    "Homestays in Lonavala",
+    "Farmhouses in Lonavala",
+    "Boutique Hotels in Lonavala",
+    "Pool Villas in Lonavala"
+]
 
-results = search_places(QUERY)
+MAX_HOTELS = 60
 
-hotels = results.get("results", [])
+all_hotels = []
+seen_place_ids = set()
+
+for query in SEARCH_QUERIES:
+
+    print(f"\nSearching: {query}")
+
+    try:
+
+        results = search_places(query)
+
+        for hotel in results.get(
+            "results",
+            []
+        ):
+
+            place_id = hotel.get(
+                "place_id"
+            )
+
+            if (
+                place_id
+                and place_id not in seen_place_ids
+            ):
+
+                seen_place_ids.add(
+                    place_id
+                )
+
+                all_hotels.append(
+                    hotel
+                )
+
+    except Exception as e:
+
+        print(
+            f"Search Error: {e}"
+        )
+
+hotels = all_hotels
 
 print("\nHOTELS RETURNED BY GOOGLE:\n")
 
@@ -286,6 +328,51 @@ for count, place in enumerate(
                 if best_score >= 80:
 
                     price_per_day = best_price
+                    try:
+
+                        numeric_price = int(
+                            str(price_per_day)
+                            .replace("₹", "")
+                            .replace(",", "")
+                        )
+
+                        property_lower = (
+                            property_type.lower()
+                        )
+
+                        keep_lead = True
+
+                        if (
+                            "hotel" in property_lower
+                            or "resort" in property_lower
+                        ):
+
+                            if (
+                                numeric_price < 3000
+                                or numeric_price > 10000
+                            ):
+
+                                keep_lead = False
+
+                        elif (
+                            "villa" in property_lower
+                            or "farmhouse" in property_lower
+                            or "homestay" in property_lower
+                        ):
+
+                            if (
+                                numeric_price < 15000
+                                or numeric_price > 60000
+                            ):
+
+                                keep_lead = False
+
+                        if not keep_lead:
+
+                            continue
+
+                    except:
+                        pass
 
                     print(
                         f"PRICE MATCHED: {name} -> {best_price} (Score: {best_score})"
@@ -305,7 +392,37 @@ for count, place in enumerate(
                     "Price Error:",
                     e
                 )
+        monthly_revenue_10_days = ""
+        monthly_revenue_25_days = ""
+        revenue_range = ""
 
+        try:
+
+            if price_per_day:
+
+                numeric_price = int(
+                    str(price_per_day)
+                    .replace("₹", "")
+                    .replace(",", "")
+                    .strip()
+                )
+
+                monthly_revenue_10_days = (
+                    numeric_price * 10
+                )
+
+                monthly_revenue_25_days = (
+                    numeric_price * 25
+                )
+
+                revenue_range = (
+                    f"₹{monthly_revenue_10_days:,}"
+                    f" - "
+                    f"₹{monthly_revenue_25_days:,}"
+                )
+
+        except:
+            pass
         # ==========================
         # SAVE ROW
         # ==========================
@@ -367,6 +484,15 @@ for count, place in enumerate(
             "PRICE PER DAY":
             price_per_day,
 
+            "MONTHLY REVENUE (10 DAYS)":
+            monthly_revenue_10_days,
+
+            "MONTHLY REVENUE (25 DAYS)":
+            monthly_revenue_25_days,
+
+            "POTENTIAL MONTHLY REVENUE RANGE":
+            revenue_range,
+
             "LOCATION TYPE":
             location_type,
 
@@ -424,38 +550,6 @@ print("\nPreview:\n")
 print(df.head())
 
 # ==================================
-# FILTER BY PRICE
-# ==================================
-
-filtered_df = df.copy()
-
-filtered_df["PRICE_NUM"] = (
-    filtered_df["PRICE PER DAY"]
-    .astype(str)
-    .str.replace("₹", "", regex=False)
-    .str.replace(",", "", regex=False)
-)
-
-filtered_df["PRICE_NUM"] = pd.to_numeric(
-    filtered_df["PRICE_NUM"],
-    errors="coerce"
-)
-
-filtered_df = filtered_df[
-    (filtered_df["PRICE_NUM"] >= 15000) &
-    (filtered_df["PRICE_NUM"] <= 30000)
-]
-
-filtered_df.drop(
-    columns=["PRICE_NUM"],
-    inplace=True
-)
-
-print(
-    f"\nFiltered Leads: {len(filtered_df)}"
-)
-
-# ==================================
 # EXPORT CSV
 # ==================================
 
@@ -465,10 +559,10 @@ os.makedirs(
 )
 
 output_file = (
-    f"output/{city}_hospitality_leads_filter.csv"
+    f"output/{city}_hospitality_leads.csv"
 )
 
-filtered_df.to_csv(
+df.to_csv(
     output_file,
     index=False,
     encoding="utf-8-sig"
