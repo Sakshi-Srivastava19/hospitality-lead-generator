@@ -21,64 +21,55 @@ from property_type import (
 
 from price_extractor import get_mmt_prices
 
+import re
+
+# ==================================
+# CONFIGURATION
+# ==================================
+
+CITY = "Lonavala"
+
+QUERY = [
+    f"Hotels in {CITY}",
+    f"Resorts in {CITY}",
+    f"Villas in {CITY}",
+    f"Homestays in {CITY}",
+    f"Farmhouses in {CITY}",
+    f"Lodges in {CITY}",
+]
+
+MAX_HOTELS = 100
+
+# Words that appear across most hotel names and add no matching signal.
+# City name is excluded so it doesn't skew fuzzy scores.
+GENERIC_WORDS = {
+    "the", "a", "an", "in", "on", "by", "near", "and",
+    "hotel", "hotels", "resort", "brand", "accor", "business",
+    CITY.lower(),
+}
+
+
+def normalize_hotel_name(name, extra_stop_words=None):
+    """Return a cleaned token string suitable for fuzzy name matching."""
+    stop = GENERIC_WORDS | (extra_stop_words or set())
+
+    name = name.lower()
+    name = re.sub(r"\(.*?\)", " ", name)        # drop parentheticals
+    name = re.sub(r"[^a-z0-9\s]", " ", name)   # drop punctuation
+
+    tokens = [t for t in name.split() if t and t not in stop]
+    return " ".join(tokens)
+
+
 print("Loading MMT prices...")
 
-mmt_prices = get_mmt_prices("Lonavala")
+mmt_prices = get_mmt_prices(CITY)
 
 print("MMT hotels found:", len(mmt_prices))
 
 # Show exactly what MMT returned so name-matching issues are visible
 for _mmt_name, _mmt_price in mmt_prices.items():
     print("  MMT:", _mmt_name, "=>", _mmt_price)
-
-
-import re
-
-
-# Generic words shared across many Chennai hotels / MMT branding noise.
-# Removing only these (never location or brand words like "omr", "ibis")
-# keeps the distinctive core so token_sort_ratio can compare fairly.
-GENERIC_WORDS = {
-    "the", "a", "an", "in", "on", "by", "near", "and",
-    "hotel", "hotels", "chennai", "brand", "accor", "business"
-}
-
-
-def normalize_hotel_name(name):
-    """Strip noise so Google names and MMT names can be compared fairly.
-
-    Drops parentheticals, punctuation, and a small set of GENERIC words that
-    appear across many Chennai hotels (the/hotel/chennai/...). Location and
-    brand words (omr, sipcot, ibis, ginger, ...) are kept because they are
-    what distinguishes one property from another.
-    """
-
-    name = name.lower()
-
-    # drop parentheticals e.g. "(business class hotel)"
-    name = re.sub(r"\(.*?\)", " ", name)
-
-    # drop punctuation
-    name = re.sub(r"[^a-z0-9\s]", " ", name)
-
-    tokens = [
-        t for t in name.split()
-        if t and t not in GENERIC_WORDS
-    ]
-
-    return " ".join(tokens)
-# ==================================
-# CONFIGURATION
-# ==================================
-
-QUERY = ["Hotels in Lonavala",
-    "Resorts in Lonavala",
-    "Villas in Lonavala",
-    "Homestays in Lonavala",
-    "Farmhouses in Lonavala",
-    "Lodges in Lonavala"]
-
-MAX_HOTELS = 20
 # ==================================
 # SEARCH HOTELS
 # ==================================
@@ -258,11 +249,12 @@ for count, place in enumerate(
                 best_score = 0
                 best_price = ""
 
-                google_norm = normalize_hotel_name(name)
+                city_stop = {CITY.lower()}
+                google_norm = normalize_hotel_name(name, city_stop)
 
                 for mmt_name, mmt_price in mmt_prices.items():
 
-                    mmt_norm = normalize_hotel_name(mmt_name)
+                    mmt_norm = normalize_hotel_name(mmt_name, city_stop)
 
                     # skip if either name is all generic words - an empty
                     # string would otherwise score 100 against another empty
@@ -423,57 +415,34 @@ print("\nPreview:\n")
 
 print(df.head())
 
+os.makedirs("output", exist_ok=True)
+
 # ==================================
-# FILTER BY PRICE
+# EXPORT 1: ALL LEADS (no price filter)
 # ==================================
 
-filtered_df = df.copy()
+all_file = f"output/{CITY.lower()}_hospitality_leads_all.csv"
+df.to_csv(all_file, index=False, encoding="utf-8-sig")
+print(f"\nAll Leads CSV ({len(df)} rows):\n{all_file}")
 
-filtered_df["PRICE_NUM"] = (
-    filtered_df["PRICE PER DAY"]
+# ==================================
+# EXPORT 2: PRICE-MATCHED LEADS ONLY
+# Keeps only rows where a price was found on MMT.
+# ==================================
+
+df["PRICE_NUM"] = (
+    df["PRICE PER DAY"]
     .astype(str)
     .str.replace("₹", "", regex=False)
     .str.replace(",", "", regex=False)
 )
+df["PRICE_NUM"] = pd.to_numeric(df["PRICE_NUM"], errors="coerce")
 
-filtered_df["PRICE_NUM"] = pd.to_numeric(
-    filtered_df["PRICE_NUM"],
-    errors="coerce"
-)
+priced_df = df[df["PRICE_NUM"].notna()].drop(columns=["PRICE_NUM"])
 
-filtered_df = filtered_df[
-    (filtered_df["PRICE_NUM"] >= 15000) &
-    (filtered_df["PRICE_NUM"] <= 30000)
-]
+priced_file = f"output/{CITY.lower()}_hospitality_leads_priced.csv"
+priced_df.to_csv(priced_file, index=False, encoding="utf-8-sig")
+print(f"Priced Leads CSV ({len(priced_df)} rows):\n{priced_file}")
 
-filtered_df.drop(
-    columns=["PRICE_NUM"],
-    inplace=True
-)
-
-print(
-    f"\nFiltered Leads: {len(filtered_df)}"
-)
-
-# ==================================
-# EXPORT CSV
-# ==================================
-
-os.makedirs(
-    "output",
-    exist_ok=True
-)
-
-output_file = (
-    f"output/{city}_hospitality_leads_filter.csv"
-)
-
-filtered_df.to_csv(
-    output_file,
-    index=False,
-    encoding="utf-8-sig"
-)
-
-print(
-    f"\nCSV Generated Successfully:\n{output_file}"
-)
+# Clean up temp column from original df
+df.drop(columns=["PRICE_NUM"], inplace=True, errors="ignore")

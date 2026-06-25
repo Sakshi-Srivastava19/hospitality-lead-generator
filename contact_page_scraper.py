@@ -1,12 +1,22 @@
 import requests
 import re
+from urllib.parse import urlparse, urlunparse
 from bs4 import BeautifulSoup
+
+
+def _base_url(website):
+    """Return scheme + netloc + path only — strip query params and fragments."""
+    p = urlparse(website)
+    return urlunparse((p.scheme, p.netloc, p.path.rstrip("/"), "", "", ""))
 
 
 def scrape_contact_pages(website):
 
     emails = set()
     phones = set()
+
+    # Build pages from the clean base URL (no query string)
+    base = _base_url(website)
 
     pages = [
         "",
@@ -24,7 +34,7 @@ def scrape_contact_pages(website):
 
         try:
 
-            url = website.rstrip("/") + page
+            url = base + page
 
             print(f"Checking: {url}")
 

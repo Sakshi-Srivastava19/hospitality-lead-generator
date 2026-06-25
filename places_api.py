@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 from dotenv import load_dotenv
 
@@ -11,40 +12,70 @@ if not API_KEY:
         "Google Places API Key not found in .env file"
     )
 
+_SEARCH_URL  = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+_DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
+
+
+def _search_one(query):
+    """
+    Run a single text-search query with pagination.
+    Returns a list of place result dicts (up to 60 per query — 3 pages of 20).
+    """
+    results = []
+    params  = {"query": query, "key": API_KEY}
+
+    for page in range(3):           # Google allows max 3 pages (60 results)
+        resp = requests.get(_SEARCH_URL, params=params, timeout=15)
+        data = resp.json()
+
+        status = data.get("status")
+        if status not in ("OK", "ZERO_RESULTS"):
+            print(f"  Places API error for '{query}': {status} — "
+                  f"{data.get('error_message', '')}")
+            break
+
+        page_results = data.get("results", [])
+        results.extend(page_results)
+
+        token = data.get("next_page_token")
+        if not token:
+            break
+
+        # Google requires a short delay before the next-page token is valid
+        time.sleep(2)
+        params = {"pagetoken": token, "key": API_KEY}
+
+    return results
+
 
 def search_places(query):
+    """
+    Accept either a single query string or a list of query strings.
+    Runs each query (with pagination) and returns deduplicated results
+    in the same format as the original single-query response.
+    """
+    queries = [query] if isinstance(query, str) else list(query)
 
-    url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+    seen_ids  = set()
+    all_results = []
 
-    params = {
-        "query": query,
-        "key": API_KEY
-    }
+    for q in queries:
+        print(f"\n===== SEARCH: {q} =====")
+        page_results = _search_one(q)
+        added = 0
+        for place in page_results:
+            pid = place.get("place_id")
+            if pid and pid not in seen_ids:
+                seen_ids.add(pid)
+                all_results.append(place)
+                added += 1
+        print(f"Results: {len(page_results)} fetched, {added} new unique")
 
-    response = requests.get(url, params=params)
-
-    data = response.json()
-
-    print("\n===== SEARCH RESPONSE =====")
-    print("Status:", data.get("status"))
-    print("Results Found:", len(data.get("results", [])))
-
-    status = data.get("status")
-
-    if status not in ("OK", "ZERO_RESULTS"):
-        raise RuntimeError(
-            f"Google Places request failed: {status} - "
-            f"{data.get('error_message', 'no error message')}. "
-            f"Check that GOOGLE_PLACES_API_KEY in .env is a valid key "
-            f"with the Places API enabled and billing active."
-        )
-
-    return data
+    print(f"\nTotal unique places found: {len(all_results)}")
+    return {"results": all_results, "status": "OK"}
 
 
 def get_place_details(place_id):
-
-    url = "https://maps.googleapis.com/maps/api/place/details/json"
 
     params = {
         "place_id": place_id,
@@ -60,6 +91,5 @@ def get_place_details(place_id):
         "key": API_KEY
     }
 
-    response = requests.get(url, params=params)
-
+    response = requests.get(_DETAILS_URL, params=params, timeout=15)
     return response.json()
