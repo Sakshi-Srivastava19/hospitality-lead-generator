@@ -1,161 +1,42 @@
-import json
 import re
 import time
 from datetime import datetime, timedelta
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from bs4 import BeautifulSoup
 from config import (
-    MMT_CITY_CODES       as CITY_CODES,
-    PROPERTY_KEYWORDS,
-    MMT_CHECKIN_DAYS_OFFSET,
-    MMT_CHECKOUT_DAYS_OFFSET,
-    MMT_ROOM_COUNT,
-    MMT_ADULTS_COUNT,
-    MMT_CHILD_COUNT,
-    MMT_API_PAGE_LIMIT,
-    MMT_API_MAX_PAGES,
-    MMT_API_PAGE_DELAY,
-    MMT_SCRIPT_TIMEOUT,
-    MMT_MAX_SCROLLS,
-    MMT_STALE_SCROLL_LIMIT,
-    MMT_PAGE_LOAD_WAIT,
-    MMT_SCROLL_WAIT,
+    CHECKIN_DAYS_OFFSET,
+    CHECKOUT_DAYS_OFFSET,
+    ROOM_COUNT,
+    ADULTS_COUNT,
+    CHILD_COUNT,
+    BOOKING_PAGE_LOAD_WAIT,
+    BOOKING_SCROLL_WAIT,
+    BOOKING_MAX_PAGES,
 )
 
-# JS injected before page load — hides webdriver flag
 _HIDE_WEBDRIVER_JS = (
     "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
 )
 
-# JS to call search-hotels API from within the browser (bypasses Akamai)
-# Returns list of hotel names only (prices come from JSON-LD separately).
-_SEARCH_HOTELS_JS = """
-var callback = arguments[arguments.length - 1];
-var cityCode = arguments[0];
-var checkin   = arguments[1];
-var checkout  = arguments[2];
-var lastHotelId     = arguments[3];
-var totalHotelsShown = arguments[4];
+_BOOKING_BASE = "https://www.booking.com/searchresults.html"
 
-var vid       = crypto.randomUUID();
-var deviceId  = crypto.randomUUID();
-var sessionId = crypto.randomUUID();
-var reqId     = crypto.randomUUID();
-
-var usrMcid = '';
-try {
-    document.cookie.split(';').forEach(function(c) {
-        if (c.trim().startsWith('AMCV_')) {
-            var parts = c.split('|');
-            for (var i = 0; i < parts.length; i++) {
-                if (parts[i] === 'MCMID') { usrMcid = parts[i + 1]; }
-            }
-        }
-    });
-} catch (e) {}
-
-var url = (
-    'https://mapi.makemytrip.com/clientbackend/cg/search-hotels/DESKTOP/2'
-    + '?cityCode=' + cityCode
-    + '&requestId=' + reqId
-    + '&language=eng&region=in&currency=INR&idContext=B2C&countryCode=IN'
-);
-
-var body = {
-    deviceDetails: {
-        appVersion: '149.0.0.0', deviceId: deviceId,
-        bookingDevice: 'DESKTOP', networkType: 'WiFi',
-        deviceType: 'DESKTOP', deviceName: null
-    },
-    filterRemovedCriteria: null,
-    searchCriteria: {
-        checkIn: checkin, checkOut: checkout, limit: arguments[5],
-        roomStayCandidates: [{adultCount: 2, rooms: 1, childAges: []}],
-        countryCode: 'IN', cityCode: cityCode, locationId: cityCode,
-        locationType: 'city', currency: 'INR', preAppliedFilter: false,
-        userSearchType: 'city', lastHotelId: lastHotelId,
-        lastHotelCategory: '', personalizedSearch: true, nearBySearch: false,
-        totalHotelsShown: totalHotelsShown, personalCorpBooking: false,
-        rmDHS: false, lastFetchedWindowInfo: '000000000000000#0#15#false'
-    },
-    requestDetails: {
-        visitorId: vid, visitNumber: 1,
-        trafficSource: {flowType: 'funnel'}, funnelSource: 'HOTELS',
-        idContext: 'B2C', pageContext: 'LISTING', channel: 'B2Cweb',
-        journeyId: reqId, requestId: reqId, sessionId: sessionId,
-        subPageContext: '', couponCount: 2, seoCorp: false,
-        loggedIn: false, forwardBookingFlow: false
-    },
-    featureFlags: {
-        soldOut: true, staticData: true, extraAltAccoRequired: false,
-        freeCancellation: true, coupon: true, walletRequired: true,
-        mmtPrime: false, checkAvailability: true, reviewSummaryRequired: false
-    },
-    imageDetails: {types: ['professional'], categories: [{type: 'H', count: 1, height: 162, width: 243, imageFormat: 'webp'}]},
-    filterCriteria: [], matchMakerDetails: {}, sortCriteria: null
-};
-
-fetch(url, {
-    method: 'POST',
-    headers: {
-        'Content-Type': 'application/json', 'Accept': 'application/json',
-        'Referer': 'https://www.makemytrip.com/',
-        'currency': 'INR', 'entity-name': 'india', 'language': 'eng',
-        'os': 'desktop', 'region': 'IN', 'server': 'b2c', 'tid': 'avc',
-        'user-country': 'IN', 'user-currency': 'INR',
-        'usr-mcid': usrMcid, 'vid': vid, 'visitor-id': vid
-    },
-    body: JSON.stringify(body)
-})
-.then(function(r) { return r.json(); })
-.then(function(data) {
-    var resp     = data.response || {};
-    var sections = resp.personalizedSections || [];
-    var main     = sections.find(function(s) { return s.name === 'RECOMMENDED_HOTELS'; })
-                   || sections[0] || {};
-    var hotels   = main.hotels || [];
-    callback({
-        success: true,
-        hotelNames: hotels.map(function(h) { return h.name || ''; }),
-        lastHotelId: resp.lastHotelId || '',
-        noMoreHotels: resp.noMoreHotels || false,
-        count: hotels.length
-    });
-})
-.catch(function(err) {
-    callback({success: false, error: err.toString()});
-});
-"""
-
-# JS to read schema.org JSON-LD from the DOM (must run client-side;
-# BeautifulSoup can't read dynamically-inserted script elements reliably).
-_READ_LD_JS = """
-var results = [];
-var scripts = document.querySelectorAll('script[type="application/ld+json"]');
-for (var i = 0; i < scripts.length; i++) {
-    try { results.push(JSON.parse(scripts[i].textContent)); } catch (e) {}
-}
-return results;
-"""
+# Selectors tried in order when looking for the Next-page button
 
 
-def _build_url(city_code):
-    checkin  = (datetime.now() + timedelta(days=MMT_CHECKIN_DAYS_OFFSET)).strftime("%m%d%Y")
-    checkout = (datetime.now() + timedelta(days=MMT_CHECKOUT_DAYS_OFFSET)).strftime("%m%d%Y")
+def _build_url(city):
+    checkin  = (datetime.now() + timedelta(days=CHECKIN_DAYS_OFFSET)).strftime("%Y-%m-%d")
+    checkout = (datetime.now() + timedelta(days=CHECKOUT_DAYS_OFFSET)).strftime("%Y-%m-%d")
     return (
-        f"https://www.makemytrip.com/hotels/hotel-listing/"
-        f"?city={city_code}"
-        f"&country=IN"
-        f"&locusId={city_code}"
-        f"&locusType=city"
+        f"{_BOOKING_BASE}"
+        f"?ss={city}"
         f"&checkin={checkin}"
         f"&checkout={checkout}"
-        f"&roomCount={MMT_ROOM_COUNT}"
-        f"&adultsCount={MMT_ADULTS_COUNT}"
-        f"&childCount={MMT_CHILD_COUNT}"
+        f"&group_adults={ADULTS_COUNT}"
+        f"&no_rooms={ROOM_COUNT}"
+        f"&group_children={CHILD_COUNT}"
+        f"&selected_currency=INR"
+        f"&order=price"
     )
 
 
@@ -168,257 +49,144 @@ def _make_driver():
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
     driver = webdriver.Chrome(options=options)
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
-                           {"source": _HIDE_WEBDRIVER_JS})
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {"source": _HIDE_WEBDRIVER_JS},
+    )
     return driver
 
 
-def _extract_from_json_ld(driver):
-    """
-    Read schema.org JSON-LD via JavaScript and return {name_lower: '₹price'}.
-    JSON-LD is injected by MMT's React app and contains the initial top-5
-    hotels with priceRange.  BeautifulSoup .string fails on dynamic scripts.
-    """
-    prices = {}
-    try:
-        ld_list = driver.execute_script(_READ_LD_JS) or []
-        for data in ld_list:
-            for block in data.get("@graph", []):
-                if block.get("@type") != "ItemList":
-                    continue
-                for el in block.get("itemListElement", []):
-                    hotel = el.get("item", {})
-                    name      = hotel.get("name", "")
-                    price_raw = hotel.get("priceRange", "")
-                    if not name or not price_raw:
-                        continue
-                    digits = re.sub(r"[^\d]", "", str(price_raw))
-                    if digits:
-                        val = int(digits)
-                        if val > 0:
-                            prices[name.lower().strip()] = f"₹{val:,}"
-    except Exception:
-        pass
-    return prices
+def _dismiss_popups(driver):
+    """Silently close cookie consent, sign-in, and promo overlays."""
+    for sel in [
+        "#onetrust-accept-btn-handler",
+        "[data-testid='accept-all-cookies-button']",
+        "[aria-label='Dismiss sign in information.']",
+        "[data-testid='dismiss-button']",
+        "[aria-label='Close']",
+        "button.modal-mask-closeBtn",
+    ]:
+        try:
+            driver.find_element(By.CSS_SELECTOR, sel).click()
+            time.sleep(0.4)
+        except Exception:
+            pass
 
 
-def _extract_from_html_cards(page_source):
+def _extract_cards(driver):
     """
-    Fallback: parse rendered hotel cards for names + inline price text.
-    Only keeps hospitality-type properties (resort, villa, etc.).
+    Parse currently visible property cards.
+    Returns {hotel_name_lower: price_int} — price is the nightly rate in INR.
     """
-    soup   = BeautifulSoup(page_source, "lxml")
-    prices = {}
-    seen   = set()
-
-    cards = (
-        soup.select("[class*='listingRow']")
-        or soup.select("[class*='hotelRow']")
-        or soup.select("[class*='hotel-card']")
-        or soup.select("[class*='hotelCard']")
-        or soup.select("li[class*='hotel']")
-    )
-
+    results = {}
+    cards = driver.find_elements(By.CSS_SELECTOR, '[data-testid="property-card"]')
     for card in cards:
-        name_node = (
-            card.select_one("p[itemprop='name']")
-            or card.select_one("[class*='hotelName']")
-            or card.select_one("[class*='hotel-name']")
-            or card.select_one("[class*='propertyName']")
-            or card.select_one("h3")
-            or card.select_one("h2")
-        )
-        if not name_node:
+        # Hotel name
+        try:
+            name = card.find_element(
+                By.CSS_SELECTOR, '[data-testid="title"]'
+            ).text.strip()
+        except Exception:
+            continue
+        if not name:
             continue
 
-        hotel_name = name_node.get_text(strip=True)
-        if not hotel_name or hotel_name in seen:
-            continue
-        seen.add(hotel_name)
+        # Price
+        try:
+            price_el = card.find_element(
+                By.CSS_SELECTOR, '[data-testid="price-and-discounted-price"]'
+            )
+            price_text = price_el.text
+        except Exception:
+            price_text = card.text
 
-        card_text = card.get_text(" ", strip=True)
-        if not any(kw in hotel_name.lower() or kw in card_text.lower()
-                   for kw in PROPERTY_KEYWORDS):
-            continue
+        digits = re.sub(r"[^\d]", "", price_text.split("\n")[0])
+        if digits:
+            val = int(digits)
+            if val > 100:
+                results[name.lower().strip()] = val
 
-        price_matches = re.findall(r"₹\s?[\d,]+", card_text)
-        vals = []
-        for m in price_matches:
-            try:
-                v = int(re.sub(r"[₹,\s]", "", m))
-                if v > 500:
-                    vals.append(v)
-            except ValueError:
-                pass
-
-        if vals:
-            best = min(v for v in vals if v > 1000) if any(v > 1000 for v in vals) else vals[0]
-            prices[hotel_name.lower().strip()] = f"₹{best:,}"
-
-    return prices
+    return results
 
 
-def _get_all_hotel_names(driver, city_code, checkin_fmt, checkout_fmt):
+def _click_load_more(driver):
     """
-    Call MMT's search-hotels API from inside the browser with pagination
-    to collect ALL hotel names for this city (no prices — used for matching).
+    Click 'Load more results' if visible. Returns True if clicked.
+    The button has no data-testid or aria-label — matched by text only.
     """
-    all_names  = []
-    last_id    = ""
-    total_seen = 0
-
-    driver.set_script_timeout(MMT_SCRIPT_TIMEOUT)
-
-    for page in range(MMT_API_MAX_PAGES):
-        result = driver.execute_async_script(
-            _SEARCH_HOTELS_JS,
-            city_code, checkin_fmt, checkout_fmt,
-            last_id, total_seen, MMT_API_PAGE_LIMIT
+    try:
+        btn = driver.find_element(
+            By.XPATH,
+            "//button[normalize-space(.)='Load more results']"
         )
-
-        if not result or not result.get("success"):
-            print(f"  API page {page+1}: error — {result.get('error','')}")
-            break
-
-        names = result.get("hotelNames", [])
-        if not names:
-            break
-
-        all_names.extend(n for n in names if n)
-        total_seen += len(names)
-        last_id     = result.get("lastHotelId", "")
-        no_more     = result.get("noMoreHotels", True)
-
-        print(f"  API page {page+1}: {len(names)} hotels "
-              f"(total {total_seen}, noMore={no_more})")
-
-        if no_more or not last_id:
-            break
-
-        time.sleep(MMT_API_PAGE_DELAY)
-
-    return list(dict.fromkeys(all_names))   # deduplicate, preserve order
+        driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+        time.sleep(0.5)
+        driver.execute_script("arguments[0].click();", btn)
+        return True
+    except Exception:
+        return False
 
 
-def get_mmt_prices(city):
-    city_code = CITY_CODES.get(city.lower())
-    if not city_code:
-        print(f"City not supported: {city}")
-        return {}
+def get_booking_prices(city):
+    """
+    Scrape Booking.com search results for *city* and return
+    {hotel_name_lower: price_int}  where price is ₹/night.
 
-    listing_url  = _build_url(city_code)
-    checkin_fmt  = (datetime.now() + timedelta(days=MMT_CHECKIN_DAYS_OFFSET)).strftime("%Y-%m-%d")
-    checkout_fmt = (datetime.now() + timedelta(days=MMT_CHECKOUT_DAYS_OFFSET)).strftime("%Y-%m-%d")
-
-    driver = _make_driver()
-    prices = {}
+    Booking.com loads hotels in two stages:
+      1. Lazy-load: each scroll-to-bottom reveals ~25 more cards.
+      2. 'Load more results' button: appears after lazy-load exhausts (~75
+         cards); clicking it fetches the next batch, then lazy-load resumes.
+    We alternate between scrolling and clicking the button until no new
+    hotels appear for 2 consecutive attempts, or BOOKING_MAX_PAGES is hit.
+    """
+    base_url = _build_url(city)
+    driver   = _make_driver()
+    prices   = {}
 
     try:
-        print(f"\nLoading MMT: {listing_url}")
-        driver.get(listing_url)
-        time.sleep(MMT_PAGE_LOAD_WAIT)
+        print(f"\nLoading Booking.com: {base_url}")
+        driver.get(base_url)
+        time.sleep(BOOKING_PAGE_LOAD_WAIT)
+        _dismiss_popups(driver)
+        time.sleep(1)
 
-        print(f"Page title: {driver.title}")
+        stale = 0
+        for batch in range(BOOKING_MAX_PAGES):
+            # Scroll to the very bottom to trigger the next lazy-load batch
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(BOOKING_SCROLL_WAIT * 3)
 
-        # Close login / promo popup
-        for xpath in [
-            "//span[@data-cy='closeModal']",
-            "//button[contains(@class,'close')]",
-            "//*[@id='login_modal_close']",
-        ]:
-            try:
-                driver.find_element(By.XPATH, xpath).click()
-                print("Popup closed")
-                time.sleep(2)
-                break
-            except Exception:
-                pass
+            # If a 'Load more results' button is present, click it
+            if _click_load_more(driver):
+                print(f"  Batch {batch + 1}: clicked 'Load more results'")
+                time.sleep(BOOKING_PAGE_LOAD_WAIT)
 
-        time.sleep(3)
+            page_prices = _extract_cards(driver)
+            new_count   = sum(1 for n in page_prices if n not in prices)
+            prices.update(page_prices)
 
-        # ── Source 1: schema.org JSON-LD (most reliable, has prices) ─────────
-        print("\nExtracting prices from JSON-LD schema...")
-        json_ld_prices = _extract_from_json_ld(driver)
-        print(f"  JSON-LD: {len(json_ld_prices)} hotels with prices")
-        for name, price in json_ld_prices.items():
-            print(f"    {name}: {price}")
-        prices.update(json_ld_prices)
+            print(f"  Batch {batch + 1}: {len(page_prices)} cards visible, "
+                  f"{new_count} new, total {len(prices)}")
 
-        # ── Source 2: scroll and get more from rendered hotel cards ──────────
-        print("\nScrolling to load more hotel cards...")
-        body       = driver.find_element(By.TAG_NAME, "body")
-        prev_count = len(prices)
-        stale      = 0
-
-        for i in range(MMT_MAX_SCROLLS):
-            body.send_keys(Keys.PAGE_DOWN)
-            time.sleep(MMT_SCROLL_WAIT)
-            body.send_keys(Keys.PAGE_DOWN)
-            time.sleep(MMT_SCROLL_WAIT)
-
-            # Try clicking "Load More" / "Show More"
-            for label in ["Load More", "Show More", "LOAD MORE"]:
-                try:
-                    btn = driver.find_element(
-                        By.XPATH,
-                        f"//*[normalize-space(text())='{label}']"
-                    )
-                    driver.execute_script("arguments[0].click();", btn)
-                    time.sleep(2)
-                    break
-                except Exception:
-                    pass
-
-            # Re-extract JSON-LD (React may have added more hotels)
-            new_ld = _extract_from_json_ld(driver)
-            for n, p in new_ld.items():
-                if n not in prices:
-                    prices[n] = p
-
-            # Also parse HTML cards
-            html_prices = _extract_from_html_cards(driver.page_source)
-            for n, p in html_prices.items():
-                if n not in prices:
-                    prices[n] = p
-
-            if len(prices) == prev_count:
+            if new_count == 0:
                 stale += 1
-                if stale >= MMT_STALE_SCROLL_LIMIT:
-                    print(f"  No new hotels after scroll {i+1} — stopping")
+                if stale >= 2:
+                    print("  No new hotels after 2 consecutive attempts — done.")
                     break
             else:
                 stale = 0
 
-            print(f"  Scroll {i+1}: {len(prices)} hotels with prices")
-            prev_count = len(prices)
-
-        # ── Source 3: search-hotels API → hotel names without prices ─────────
-        # These give us names for fuzzy matching even without a price yet.
-        print("\nFetching all hotel names from search-hotels API...")
-        api_names = _get_all_hotel_names(driver, city_code, checkin_fmt, checkout_fmt)
-        print(f"  API returned {len(api_names)} hotel names")
-
-        # Hotels from API that we don't have prices for yet get placeholder
-        # so the caller knows they exist on MMT (useful for name matching).
-        # We do NOT add a price — the matcher must find a priced entry.
-        # (kept as comment; enable if you want name-only entries)
-        # for name in api_names:
-        #     key = name.lower().strip()
-        #     if key not in prices:
-        #         prices[key] = ""
-
     except Exception as e:
-        print(f"MMT Error: {e}")
+        print(f"Booking.com scrape error: {e}")
 
     finally:
         driver.quit()
 
-    print(f"\nTotal MMT hotels with prices: {len(prices)}")
+    print(f"\nBooking.com total: {len(prices)} hotels with prices")
     return prices
 
 
 if __name__ == "__main__":
-    result = get_mmt_prices("Lonavala")
-    print(f"\nTOTAL: {len(result)}")
-    for hotel, price in result.items():
-        print(f"  {hotel} => {price}")
+    result = get_booking_prices("Lonavala")
+    for name, price in sorted(result.items(), key=lambda x: x[1]):
+        print(f"  ₹{price:,}  {name}")

@@ -17,6 +17,26 @@ _SEARCH_URL  = "https://maps.googleapis.com/maps/api/place/textsearch/json"
 _DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
 
 
+def _fetch_with_retry(params):
+    """
+    Fetch one Places API page. next_page_token requests often return
+    INVALID_REQUEST if the token isn't activated yet. Retry up to 3 times
+    with increasing delays (3 s, 4 s, 5 s) before giving up.
+    """
+    resp = requests.get(_SEARCH_URL, params=params, timeout=PLACES_REQUEST_TIMEOUT)
+    data = resp.json()
+
+    if params.get("pagetoken"):
+        for wait in (3, 4, 5):
+            if data.get("status") != "INVALID_REQUEST":
+                break
+            time.sleep(wait)
+            resp = requests.get(_SEARCH_URL, params=params, timeout=PLACES_REQUEST_TIMEOUT)
+            data = resp.json()
+
+    return data
+
+
 def _search_one(query):
     """
     Run a single text-search query with pagination.
@@ -26,23 +46,21 @@ def _search_one(query):
     params  = {"query": query, "key": API_KEY}
 
     for page in range(PLACES_MAX_PAGES):
-        resp = requests.get(_SEARCH_URL, params=params, timeout=PLACES_REQUEST_TIMEOUT)
-        data = resp.json()
-
+        data   = _fetch_with_retry(params)
         status = data.get("status")
+
         if status not in ("OK", "ZERO_RESULTS"):
-            print(f"  Places API error for '{query}': {status} — "
+            print(f"  Places API error for '{query}' (page {page+1}): {status} — "
                   f"{data.get('error_message', '')}")
             break
 
-        page_results = data.get("results", [])
-        results.extend(page_results)
+        results.extend(data.get("results", []))
 
         token = data.get("next_page_token")
         if not token:
             break
 
-        # Google requires a short delay before the next-page token is valid
+        # Wait for token to activate, then prepare next-page params
         time.sleep(PLACES_PAGE_DELAY)
         params = {"pagetoken": token, "key": API_KEY}
 
