@@ -7,24 +7,23 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from bs4 import BeautifulSoup
-
-
-CITY_CODES = {
-    "delhi": "CTDEL",
-    "mumbai": "CTBOM",
-    "goa": "CTGOI",
-    "bangalore": "CTBLR",
-    "hyderabad": "CTHYD",
-    "chennai": "CTMAA",
-    "kolkata": "CTCCU",
-    "pune": "CTPNQ",
-    "lonavala": "CTXLK",
-}
-
-PROPERTY_KEYWORDS = {
-    "villa", "resort", "farm", "farmhouse",
-    "estate", "cottage", "bungalow", "homestay",
-}
+from config import (
+    MMT_CITY_CODES       as CITY_CODES,
+    PROPERTY_KEYWORDS,
+    MMT_CHECKIN_DAYS_OFFSET,
+    MMT_CHECKOUT_DAYS_OFFSET,
+    MMT_ROOM_COUNT,
+    MMT_ADULTS_COUNT,
+    MMT_CHILD_COUNT,
+    MMT_API_PAGE_LIMIT,
+    MMT_API_MAX_PAGES,
+    MMT_API_PAGE_DELAY,
+    MMT_SCRIPT_TIMEOUT,
+    MMT_MAX_SCROLLS,
+    MMT_STALE_SCROLL_LIMIT,
+    MMT_PAGE_LOAD_WAIT,
+    MMT_SCROLL_WAIT,
+)
 
 # JS injected before page load — hides webdriver flag
 _HIDE_WEBDRIVER_JS = (
@@ -73,7 +72,7 @@ var body = {
     },
     filterRemovedCriteria: null,
     searchCriteria: {
-        checkIn: checkin, checkOut: checkout, limit: 100,
+        checkIn: checkin, checkOut: checkout, limit: arguments[5],
         roomStayCandidates: [{adultCount: 2, rooms: 1, childAges: []}],
         countryCode: 'IN', cityCode: cityCode, locationId: cityCode,
         locationType: 'city', currency: 'INR', preAppliedFilter: false,
@@ -144,8 +143,8 @@ return results;
 
 
 def _build_url(city_code):
-    checkin  = (datetime.now() + timedelta(days=1)).strftime("%m%d%Y")
-    checkout = (datetime.now() + timedelta(days=2)).strftime("%m%d%Y")
+    checkin  = (datetime.now() + timedelta(days=MMT_CHECKIN_DAYS_OFFSET)).strftime("%m%d%Y")
+    checkout = (datetime.now() + timedelta(days=MMT_CHECKOUT_DAYS_OFFSET)).strftime("%m%d%Y")
     return (
         f"https://www.makemytrip.com/hotels/hotel-listing/"
         f"?city={city_code}"
@@ -154,9 +153,9 @@ def _build_url(city_code):
         f"&locusType=city"
         f"&checkin={checkin}"
         f"&checkout={checkout}"
-        f"&roomCount=1"
-        f"&adultsCount=2"
-        f"&childCount=0"
+        f"&roomCount={MMT_ROOM_COUNT}"
+        f"&adultsCount={MMT_ADULTS_COUNT}"
+        f"&childCount={MMT_CHILD_COUNT}"
     )
 
 
@@ -268,13 +267,13 @@ def _get_all_hotel_names(driver, city_code, checkin_fmt, checkout_fmt):
     last_id    = ""
     total_seen = 0
 
-    driver.set_script_timeout(30)
+    driver.set_script_timeout(MMT_SCRIPT_TIMEOUT)
 
-    for page in range(10):
+    for page in range(MMT_API_MAX_PAGES):
         result = driver.execute_async_script(
             _SEARCH_HOTELS_JS,
             city_code, checkin_fmt, checkout_fmt,
-            last_id, total_seen
+            last_id, total_seen, MMT_API_PAGE_LIMIT
         )
 
         if not result or not result.get("success"):
@@ -296,7 +295,7 @@ def _get_all_hotel_names(driver, city_code, checkin_fmt, checkout_fmt):
         if no_more or not last_id:
             break
 
-        time.sleep(1)
+        time.sleep(MMT_API_PAGE_DELAY)
 
     return list(dict.fromkeys(all_names))   # deduplicate, preserve order
 
@@ -308,8 +307,8 @@ def get_mmt_prices(city):
         return {}
 
     listing_url  = _build_url(city_code)
-    checkin_fmt  = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-    checkout_fmt = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
+    checkin_fmt  = (datetime.now() + timedelta(days=MMT_CHECKIN_DAYS_OFFSET)).strftime("%Y-%m-%d")
+    checkout_fmt = (datetime.now() + timedelta(days=MMT_CHECKOUT_DAYS_OFFSET)).strftime("%Y-%m-%d")
 
     driver = _make_driver()
     prices = {}
@@ -317,7 +316,7 @@ def get_mmt_prices(city):
     try:
         print(f"\nLoading MMT: {listing_url}")
         driver.get(listing_url)
-        time.sleep(10)
+        time.sleep(MMT_PAGE_LOAD_WAIT)
 
         print(f"Page title: {driver.title}")
 
@@ -351,11 +350,11 @@ def get_mmt_prices(city):
         prev_count = len(prices)
         stale      = 0
 
-        for i in range(20):
+        for i in range(MMT_MAX_SCROLLS):
             body.send_keys(Keys.PAGE_DOWN)
-            time.sleep(1.5)
+            time.sleep(MMT_SCROLL_WAIT)
             body.send_keys(Keys.PAGE_DOWN)
-            time.sleep(1.5)
+            time.sleep(MMT_SCROLL_WAIT)
 
             # Try clicking "Load More" / "Show More"
             for label in ["Load More", "Show More", "LOAD MORE"]:
@@ -384,7 +383,7 @@ def get_mmt_prices(city):
 
             if len(prices) == prev_count:
                 stale += 1
-                if stale >= 4:
+                if stale >= MMT_STALE_SCROLL_LIMIT:
                     print(f"  No new hotels after scroll {i+1} — stopping")
                     break
             else:

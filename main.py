@@ -1,52 +1,23 @@
 import os
+import re
 import pandas as pd
 from rapidfuzz import fuzz
-from places_api import (
-    search_places,
-    get_place_details
-)
-
-from contact_page_scraper import (
-    scrape_contact_pages
-)
-
-from social_extractor import (
-    extract_social_links
-)
-
-from property_type import (
-    get_property_type
-)
-
-
+from places_api import search_places, get_place_details
+from contact_page_scraper import scrape_contact_pages
+from social_extractor import extract_social_links
+from property_type import get_property_type
 from price_extractor import get_mmt_prices
+from config import (
+    CITY,
+    SEARCH_QUERIES,
+    MAX_HOTELS,
+    FUZZY_MATCH_THRESHOLD,
+    FUZZY_STOP_WORDS,
+    OUTPUT_ALL_FILE,
+    OUTPUT_PRICED_FILE,
+)
 
-import re
-
-# ==================================
-# CONFIGURATION
-# ==================================
-
-CITY = "Lonavala"
-
-QUERY = [
-    f"Hotels in {CITY}",
-    f"Resorts in {CITY}",
-    f"Villas in {CITY}",
-    f"Homestays in {CITY}",
-    f"Farmhouses in {CITY}",
-    f"Lodges in {CITY}",
-]
-
-MAX_HOTELS = 100
-
-# Words that appear across most hotel names and add no matching signal.
-# City name is excluded so it doesn't skew fuzzy scores.
-GENERIC_WORDS = {
-    "the", "a", "an", "in", "on", "by", "near", "and",
-    "hotel", "hotels", "resort", "brand", "accor", "business",
-    CITY.lower(),
-}
+GENERIC_WORDS = FUZZY_STOP_WORDS | {CITY.lower()}
 
 
 def normalize_hotel_name(name, extra_stop_words=None):
@@ -71,10 +42,36 @@ print("MMT hotels found:", len(mmt_prices))
 for _mmt_name, _mmt_price in mmt_prices.items():
     print("  MMT:", _mmt_name, "=>", _mmt_price)
 # ==================================
+# LOAD EXISTING RESULTS (dedup support)
+# ==================================
+
+all_file = OUTPUT_ALL_FILE
+os.makedirs(os.path.dirname(all_file), exist_ok=True)
+
+existing_df   = pd.DataFrame()
+existing_keys = set()          # set of (name_lower, website_lower) already saved
+sr_start      = 1             # next SR NO to use
+
+if os.path.exists(all_file):
+    try:
+        existing_df = pd.read_csv(all_file, encoding="utf-8-sig")
+        for _, row in existing_df.iterrows():
+            name    = str(row.get("NAME",    "")).strip().lower()
+            website = str(row.get("WEBSITE", "")).strip().lower()
+            existing_keys.add((name, website))
+        sr_start = len(existing_df) + 1
+        print(f"\nExisting CSV found: {len(existing_df)} leads already saved.")
+        print(f"Will skip duplicates and continue from SR NO {sr_start}.")
+    except Exception as e:
+        print(f"Could not load existing CSV: {e} — starting fresh.")
+else:
+    print("\nNo existing CSV found — starting fresh.")
+
+# ==================================
 # SEARCH HOTELS
 # ==================================
 
-results = search_places(QUERY)
+results = search_places(SEARCH_QUERIES)
 
 hotels = results.get("results", [])
 
@@ -83,22 +80,34 @@ print("\nHOTELS RETURNED BY GOOGLE:\n")
 for i, hotel in enumerate(hotels, start=1):
     print(f"{i}. {hotel.get('name')}")
 
+# Filter out hotels already in the existing CSV
+new_hotels = []
+for place in hotels:
+    name    = place.get("name", "").strip().lower()
+    # website not known yet at this stage — use place_id as a proxy key too
+    place_id = place.get("place_id", "")
+    # Check by name only at this stage; website checked after details fetch
+    if not any(name == k[0] for k in existing_keys):
+        new_hotels.append(place)
+
+print(f"\nNew hotels to process: {len(new_hotels)} "
+      f"(skipped {len(hotels) - len(new_hotels)} already in CSV)")
+
 rows = []
 
-print(
-    f"\nProcessing {min(MAX_HOTELS, len(hotels))} hotels...\n"
-)
+to_process = new_hotels[:MAX_HOTELS]
+print(f"Processing {len(to_process)} hotels...\n")
 
 # ==================================
 # LOOP HOTELS
 # ==================================
 
 for count, place in enumerate(
-    hotels[:MAX_HOTELS],
-    start=1
+    to_process,
+    start=sr_start
 ):
 
-    print(f"\nHotel {count}/{MAX_HOTELS}")
+    print(f"\nHotel {count - sr_start + 1}/{len(to_process)}")
 
     try:
 
@@ -275,7 +284,7 @@ for count, place in enumerate(
                         best_score = score
                         best_price = mmt_price
 
-                if best_score >= 80:
+                if best_score >= FUZZY_MATCH_THRESHOLD:
 
                     price_per_day = best_price
 
@@ -409,40 +418,38 @@ for count, place in enumerate(
 # DATAFRAME
 # ==================================
 
-df = pd.DataFrame(rows)
+new_df = pd.DataFrame(rows)
 
-print("\nPreview:\n")
+if new_df.empty:
+    print("\nNo new leads to add.")
+else:
+    print(f"\nNew leads this run: {len(new_df)}")
+    print(new_df[["SR NO", "NAME", "WEBSITE"]].head())
 
-print(df.head())
+    # ── EXPORT 1: ALL LEADS — append to existing CSV ──────────────────────
+    priced_file = OUTPUT_PRICED_FILE
 
-os.makedirs("output", exist_ok=True)
+    if existing_df.empty:
+        # First run — write header
+        new_df.to_csv(all_file, index=False, encoding="utf-8-sig")
+    else:
+        # Subsequent run — append without repeating the header
+        new_df.to_csv(all_file, mode="a", index=False,
+                      encoding="utf-8-sig", header=False)
 
-# ==================================
-# EXPORT 1: ALL LEADS (no price filter)
-# ==================================
+    total_all = len(existing_df) + len(new_df)
+    print(f"\nAll Leads CSV ({total_all} total rows):\n{all_file}")
 
-all_file = f"output/{CITY.lower()}_hospitality_leads_all.csv"
-df.to_csv(all_file, index=False, encoding="utf-8-sig")
-print(f"\nAll Leads CSV ({len(df)} rows):\n{all_file}")
-
-# ==================================
-# EXPORT 2: PRICE-MATCHED LEADS ONLY
-# Keeps only rows where a price was found on MMT.
-# ==================================
-
-df["PRICE_NUM"] = (
-    df["PRICE PER DAY"]
-    .astype(str)
-    .str.replace("₹", "", regex=False)
-    .str.replace(",", "", regex=False)
-)
-df["PRICE_NUM"] = pd.to_numeric(df["PRICE_NUM"], errors="coerce")
-
-priced_df = df[df["PRICE_NUM"].notna()].drop(columns=["PRICE_NUM"])
-
-priced_file = f"output/{CITY.lower()}_hospitality_leads_priced.csv"
-priced_df.to_csv(priced_file, index=False, encoding="utf-8-sig")
-print(f"Priced Leads CSV ({len(priced_df)} rows):\n{priced_file}")
-
-# Clean up temp column from original df
-df.drop(columns=["PRICE_NUM"], inplace=True, errors="ignore")
+    # ── EXPORT 2: PRICE-MATCHED LEADS — rebuild from full CSV ─────────────
+    # Re-read the full file so priced CSV always reflects cumulative data.
+    full_df = pd.read_csv(all_file, encoding="utf-8-sig")
+    full_df["PRICE_NUM"] = (
+        full_df["PRICE PER DAY"]
+        .astype(str)
+        .str.replace("₹", "", regex=False)
+        .str.replace(",", "", regex=False)
+    )
+    full_df["PRICE_NUM"] = pd.to_numeric(full_df["PRICE_NUM"], errors="coerce")
+    priced_df = full_df[full_df["PRICE_NUM"].notna()].drop(columns=["PRICE_NUM"])
+    priced_df.to_csv(priced_file, index=False, encoding="utf-8-sig")
+    print(f"Priced Leads CSV ({len(priced_df)} rows):\n{priced_file}")

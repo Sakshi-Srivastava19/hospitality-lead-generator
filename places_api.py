@@ -2,6 +2,7 @@ import os
 import time
 import requests
 from dotenv import load_dotenv
+from config import PLACES_MAX_PAGES, PLACES_PAGE_DELAY, PLACES_REQUEST_TIMEOUT
 
 load_dotenv()
 
@@ -24,8 +25,8 @@ def _search_one(query):
     results = []
     params  = {"query": query, "key": API_KEY}
 
-    for page in range(3):           # Google allows max 3 pages (60 results)
-        resp = requests.get(_SEARCH_URL, params=params, timeout=15)
+    for page in range(PLACES_MAX_PAGES):
+        resp = requests.get(_SEARCH_URL, params=params, timeout=PLACES_REQUEST_TIMEOUT)
         data = resp.json()
 
         status = data.get("status")
@@ -42,7 +43,7 @@ def _search_one(query):
             break
 
         # Google requires a short delay before the next-page token is valid
-        time.sleep(2)
+        time.sleep(PLACES_PAGE_DELAY)
         params = {"pagetoken": token, "key": API_KEY}
 
     return results
@@ -91,5 +92,5 @@ def get_place_details(place_id):
         "key": API_KEY
     }
 
-    response = requests.get(_DETAILS_URL, params=params, timeout=15)
+    response = requests.get(_DETAILS_URL, params=params, timeout=PLACES_REQUEST_TIMEOUT)
     return response.json()

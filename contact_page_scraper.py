@@ -2,6 +2,7 @@ import requests
 import re
 from urllib.parse import urlparse, urlunparse
 from bs4 import BeautifulSoup
+from config import CONTACT_PAGES, CONTACT_REQUEST_TIMEOUT, CONTACT_USER_AGENT
 
 
 def _base_url(website):
@@ -18,19 +19,9 @@ def scrape_contact_pages(website):
     # Build pages from the clean base URL (no query string)
     base = _base_url(website)
 
-    pages = [
-        "",
-        "/contact",
-        "/contact-us",
-        "/about",
-        "/about-us"
-    ]
+    headers = {"User-Agent": CONTACT_USER_AGENT}
 
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    for page in pages:
+    for page in CONTACT_PAGES:
 
         try:
 
@@ -41,7 +32,7 @@ def scrape_contact_pages(website):
             response = requests.get(
                 url,
                 headers=headers,
-                timeout=10
+                timeout=CONTACT_REQUEST_TIMEOUT
             )
 
             soup = BeautifulSoup(
