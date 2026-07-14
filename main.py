@@ -1,7 +1,17 @@
 import os
+import sys
 import time
 import requests
 import pandas as pd
+
+# Windows consoles/pipes often default to cp1252, which can't print
+# ₹ → ✅ ⚠ etc. Force UTF-8 output regardless of how this script is run.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 from price_extractor import get_booking_prices
 from places_api import get_place_details
@@ -11,10 +21,10 @@ from social_extractor import extract_social_links
 from config import (
     CITY,
     MAX_HOTELS,
-    PRICE_MIN,
-    PRICE_MAX,
+    NUM_PRICE_BANDS,
+    PRICE_BAND_EDGES,
     OUTPUT_ALL_FILE,
-    OUTPUT_PRICED_FILE,
+    OUTPUT_BAND_TEMPLATE,
     PLACES_REQUEST_TIMEOUT,
 )
 
@@ -155,6 +165,11 @@ def _enrich_hotel(name, city):
 # PHASE 1: SCRAPE BOOKING.COM
 # ==================================
 
+_category_label = os.environ.get("LEADGEN_CATEGORY_LABEL")
+if _category_label:
+    print("=" * 60)
+    print(f"CATEGORY: {_category_label}  |  CITY: {CITY}")
+
 print("=" * 60)
 print("PHASE 1 — Scraping Booking.com prices...")
 print("=" * 60)
@@ -260,11 +275,15 @@ else:
         new_df.to_csv(all_file, mode="a", index=False,
                       encoding="utf-8-sig", header=False)
 
-    total_all = len(existing_df) + len(new_df)
+total_all = 0
+if os.path.exists(all_file):
+    full_df = pd.read_csv(all_file, encoding="utf-8-sig")
+    total_all = len(full_df)
     print(f"All Leads CSV ({total_all} total rows): {all_file}")
 
-    # Price-filtered CSV — rebuilt from the full file each run
-    full_df = pd.read_csv(all_file, encoding="utf-8-sig")
+    # ==================================
+    # EXPORT — ONE CSV PER PRICE BAND
+    # ==================================
     full_df["PRICE_NUM"] = pd.to_numeric(
         full_df["PRICE PER DAY"]
         .astype(str)
@@ -272,13 +291,65 @@ else:
         .str.replace(",", "", regex=False),
         errors="coerce",
     )
-    priced_df = full_df[
-        full_df["PRICE_NUM"].notna()
-        & (full_df["PRICE_NUM"] >= PRICE_MIN)
-        & (full_df["PRICE_NUM"] <= PRICE_MAX)
-    ].drop(columns=["PRICE_NUM"])
-    priced_df.to_csv(OUTPUT_PRICED_FILE, index=False, encoding="utf-8-sig")
-    print(
-        f"Priced Leads CSV ({len(priced_df)} rows, "
-        f"₹{PRICE_MIN:,}–₹{PRICE_MAX:,}/night): {OUTPUT_PRICED_FILE}"
-    )
+
+    print("\nPrice-band CSVs (auto-generated from actual price distribution):")
+    priced = full_df.dropna(subset=["PRICE_NUM"])
+    no_price = len(full_df) - len(priced)
+
+    if priced.empty:
+        print("  No leads with a parseable price yet — skipping band generation.")
+    elif PRICE_BAND_EDGES:
+        # Fixed ₹ bands (e.g. set by launcher.py for the chosen category).
+        # Each band is written to its own file; bands from other categories
+        # (e.g. hotel bands vs villa bands) live in different files, so
+        # running multiple categories against the same city is safe —
+        # nothing gets overwritten across categories.
+        for low, high in PRICE_BAND_EDGES:
+            mask = (full_df["PRICE_NUM"] >= low) & (full_df["PRICE_NUM"] < high)
+            label = f"{low}-{high}"
+            band_df = full_df[mask].drop(columns=["PRICE_NUM"])
+            band_file = OUTPUT_BAND_TEMPLATE.format(band=label)
+            band_df.to_csv(band_file, index=False, encoding="utf-8-sig")
+            print(f"  ₹{label:<14} → {len(band_df):>4} rows  →  {band_file}")
+
+        if no_price:
+            print(f"\n  ({no_price} leads have no parseable price — "
+                  f"skipped from band CSVs but still in {all_file})")
+    else:
+        # Equal-frequency (quantile) bins: each band gets roughly the same
+        # number of leads, regardless of how skewed the underlying prices
+        # are (e.g. Jaipur's market is heavily clustered under ₹1,500 —
+        # fixed ₹ ranges left every band empty; quantiles self-correct).
+        n_bins = min(NUM_PRICE_BANDS, priced["PRICE_NUM"].nunique())
+        try:
+            _, raw_edges = pd.qcut(
+                priced["PRICE_NUM"], q=n_bins, retbins=True, duplicates="drop"
+            )
+            edges = sorted(set(int(round(e / 100.0) * 100) for e in raw_edges))
+        except ValueError:
+            edges = []
+
+        if len(edges) < 2:
+            edges = [int(priced["PRICE_NUM"].min()), int(priced["PRICE_NUM"].max()) + 1]
+
+        edges[0] = int(priced["PRICE_NUM"].min())
+        edges[-1] = int(priced["PRICE_NUM"].max()) + 1  # +1 so max value is included
+
+        for i in range(len(edges) - 1):
+            low, high = edges[i], edges[i + 1]
+            is_last = (i == len(edges) - 2)
+            if is_last:
+                mask = (full_df["PRICE_NUM"] >= low) & (full_df["PRICE_NUM"] <= high - 1)
+                label = f"{low}+"
+            else:
+                mask = (full_df["PRICE_NUM"] >= low) & (full_df["PRICE_NUM"] < high)
+                label = f"{low}-{high}"
+
+            band_df = full_df[mask].drop(columns=["PRICE_NUM"])
+            band_file = OUTPUT_BAND_TEMPLATE.format(band=label)
+            band_df.to_csv(band_file, index=False, encoding="utf-8-sig")
+            print(f"  ₹{label:<14} → {len(band_df):>4} rows  →  {band_file}")
+
+        if no_price:
+            print(f"\n  ({no_price} leads have no parseable price — "
+                  f"skipped from band CSVs but still in {all_file})")

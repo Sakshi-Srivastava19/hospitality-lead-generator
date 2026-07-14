@@ -3,9 +3,16 @@ enrich.py  —  Backfill empty detail columns for hotels already in the CSV.
 
 Run this once (or re-run safely — it skips hotels that already have a LOCATION
 or WEBSITE filled in, so no work is duplicated).
+
+After updating the master (all-leads) CSV, this also rebuilds every
+price-band CSV for the city (e.g. jaipur_hospitality_leads_600-1000.csv),
+since those are just filtered snapshots of the master file and go stale
+the moment the master file changes.
 """
 
 import os
+import re
+import glob
 import time
 import requests
 import pandas as pd
@@ -17,10 +24,8 @@ from contact_page_scraper import scrape_contact_pages
 from social_extractor import extract_social_links
 from config import (
     CITY,
+    OUTPUT_DIR,
     OUTPUT_ALL_FILE,
-    OUTPUT_PRICED_FILE,
-    PRICE_MIN,
-    PRICE_MAX,
     PLACES_REQUEST_TIMEOUT,
 )
 
@@ -33,6 +38,11 @@ DETAIL_COLS = [
     "EMAIL 1", "EMAIL 2", "EMAIL 3", "RATING OUT OF 5", "REVIEW COUNT",
     "LOCATION TYPE", "WEBSITE", "INSTAGRAM", "FACEBOOK", "LINKEDIN", "YOUTUBE", "TWITTER",
 ]
+
+# Matches the two band-filename shapes main.py produces:
+#   ..._leads_15000-30000.csv   (fixed/quantile band)
+#   ..._leads_60000+.csv        (open-ended top band)
+_BAND_FILE_RE = re.compile(r"_leads_(\d+)(?:-(\d+)|\+)\.csv$")
 
 
 def _search_hotel_place(name, city):
@@ -127,6 +137,44 @@ def _is_empty(row, cols):
     return True
 
 
+def _rebuild_band_files(df, city):
+    """Rebuild every existing price-band CSV for this city from the
+    (now-enriched) master dataframe. Band files are just filtered
+    snapshots of the master file, so they go stale whenever it changes —
+    this keeps them in sync regardless of what config.py's current
+    PRICE_BAND_EDGES happens to be set to right now."""
+    df = df.copy()
+    df["PRICE_NUM"] = pd.to_numeric(
+        df["PRICE PER DAY"]
+        .astype(str)
+        .str.replace("₹", "", regex=False)
+        .str.replace(",", "", regex=False),
+        errors="coerce",
+    )
+
+    pattern = os.path.join(OUTPUT_DIR, f"{city.lower()}_hospitality_leads_*.csv")
+    rebuilt = 0
+    for path in glob.glob(pattern):
+        if path.endswith("_all.csv"):
+            continue
+        m = _BAND_FILE_RE.search(path)
+        if not m:
+            continue
+        low = int(m.group(1))
+        high = int(m.group(2)) if m.group(2) else float("inf")
+
+        mask = (df["PRICE_NUM"] >= low) & (df["PRICE_NUM"] < high)
+        band_df = df[mask].drop(columns=["PRICE_NUM"])
+        band_df.to_csv(path, index=False, encoding="utf-8-sig")
+        rebuilt += 1
+        print(f"  Rebuilt {os.path.basename(path)}: {len(band_df)} rows")
+
+    if rebuilt == 0:
+        print("  No existing price-band CSVs found for this city to rebuild.")
+    else:
+        print(f"\nRebuilt {rebuilt} price-band CSV(s) with the refreshed data.")
+
+
 def run_enrich():
     if not os.path.exists(OUTPUT_ALL_FILE):
         print(f"No CSV found at {OUTPUT_ALL_FILE} — nothing to enrich.")
@@ -142,6 +190,9 @@ def run_enrich():
     print(f"Total rows: {len(df)}  |  Need enrichment: {len(needs_enrich)}")
     if needs_enrich.empty:
         print("All rows already have details — nothing to do.")
+        # Still rebuild band files in case they were generated before an
+        # earlier enrichment run and never refreshed.
+        _rebuild_band_files(df, CITY)
         return
 
     updated = 0
@@ -160,21 +211,8 @@ def run_enrich():
     df.to_csv(OUTPUT_ALL_FILE, index=False, encoding="utf-8-sig")
     print(f"\nEnriched {updated} hotels. Saved to {OUTPUT_ALL_FILE}")
 
-    # Rebuild priced CSV
-    df["PRICE_NUM"] = pd.to_numeric(
-        df["PRICE PER DAY"]
-        .astype(str)
-        .str.replace("₹", "", regex=False)
-        .str.replace(",", "", regex=False),
-        errors="coerce",
-    )
-    priced_df = df[
-        df["PRICE_NUM"].notna()
-        & (df["PRICE_NUM"] >= PRICE_MIN)
-        & (df["PRICE_NUM"] <= PRICE_MAX)
-    ].drop(columns=["PRICE_NUM"])
-    priced_df.to_csv(OUTPUT_PRICED_FILE, index=False, encoding="utf-8-sig")
-    print(f"Priced CSV rebuilt: {len(priced_df)} rows → {OUTPUT_PRICED_FILE}")
+    print("\nRebuilding price-band CSVs...")
+    _rebuild_band_files(df, CITY)
 
 
 if __name__ == "__main__":
